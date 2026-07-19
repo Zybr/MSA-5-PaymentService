@@ -1,0 +1,123 @@
+@startuml
+
+title Обработка платежа OrchestrPay
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam activity {
+  BackgroundColor #F8F9FA
+  BorderColor #495057
+  DiamondBackgroundColor #FFF3BF
+  DiamondBorderColor #F08C00
+  FontColor #212529
+}
+
+start
+
+:Создать платёж\n**CREATE_PAYMENT**; <<#D3F9D8>>
+:Состояние **CREATED**; <<#D0EBFF>>
+
+if (Клиент отменил платёж?) then (да)
+  :Отменить платёж\n**CANCEL_PAYMENT**; <<#D3F9D8>>
+  :Состояние **CANCELLED**; <<#D0EBFF>>
+  :Уведомить клиента\n**NOTIFY_CUSTOMER**; <<#D3F9D8>>
+  stop
+else (нет)
+endif
+
+:Состояние **DEBIT_PENDING**; <<#D0EBFF>>
+
+repeat
+  :Списать деньги со счёта клиента\n**DEBIT_CUSTOMER_ACCOUNT**; <<#D3F9D8>>
+  :Получить или сверить результат операции;
+repeat while (Результат неизвестен?) is (да)
+-> нет;
+
+if (Списание выполнено?) then (да)
+  :Состояние **FUNDS_DEBITED**; <<#D0EBFF>>
+
+  note right
+    Событие **CUSTOMER_CANCELLED** до pivot-точки:
+    **FUNDS_DEBITED**, **CHECKS_PENDING**,
+    **MANUAL_REVIEW_PENDING**, **APPROVED**
+    -> **REFUND_PENDING**.
+  end note
+else (нет)
+  :Состояние **FAILED**; <<#D0EBFF>>
+  :Уведомить клиента\n**NOTIFY_CUSTOMER**; <<#D3F9D8>>
+  stop
+endif
+
+:Состояние **CHECKS_PENDING**; <<#D0EBFF>>
+:Запустить антифрод-проверку\n**CHECK_FRAUD**; <<#D3F9D8>>
+
+if (Ответ FraudCheck получен до cut-off?) then (да)
+  if (FraudCheck вернул DENY?) then (да)
+    :Состояние **REJECTED**; <<#D0EBFF>>
+  else (нет)
+    if (FraudCheck вернул MANUAL_REVIEW?) then (да)
+      :Состояние **MANUAL_REVIEW_PENDING**; <<#D0EBFF>>
+
+      if (Итоговое решение получено за 20 минут?) then (да)
+        if (FraudCheck вернул ALLOW?) then (да)
+          :Состояние **APPROVED**; <<#D0EBFF>>
+        else (нет)
+          :Состояние **REJECTED**; <<#D0EBFF>>
+        endif
+      else (нет)
+        :Событие **CUT_OFF_EXPIRED**; <<#FFE8CC>>
+        :Состояние **APPROVED**; <<#D0EBFF>>
+      endif
+    else (нет)
+      :Состояние **APPROVED**; <<#D0EBFF>>
+    endif
+  endif
+else (нет)
+  :Событие **CUT_OFF_EXPIRED**; <<#FFE8CC>>
+  :Состояние **APPROVED**; <<#D0EBFF>>
+endif
+
+if (Платёж разрешён?) then (да)
+  if (Клиент отменил платёж до pivot-точки?) then (да)
+    :Зафиксировать отмену и необходимость возврата;
+  else (нет)
+    :Состояние **CREDIT_PENDING**; <<#D0EBFF>>
+
+    repeat
+      :Зачислить деньги контрагенту\n**CREDIT_COUNTERPARTY_ACCOUNT**; <<#D3F9D8>>
+      :Получить или сверить результат операции;
+    repeat while (Результат неизвестен?) is (да)
+    -> нет;
+
+    if (Зачисление выполнено?) then (да)
+      :Состояние **COMPLETED**; <<#D0EBFF>>
+      :Уведомить клиента\n**NOTIFY_CUSTOMER**; <<#D3F9D8>>
+      stop
+    else (нет)
+      :Зафиксировать необходимость возврата;
+    endif
+  endif
+else (нет)
+  :Уведомить службу безопасности\n**NOTIFY_SECURITY**; <<#D3F9D8>>
+endif
+
+:Состояние **REFUND_PENDING**; <<#D0EBFF>>
+
+repeat
+  :Вернуть деньги клиенту\n**REFUND_CUSTOMER_ACCOUNT**; <<#D3F9D8>>
+repeat while (Возврат не выполнен?) is (да)
+-> нет;
+
+:Состояние **REFUNDED**; <<#D0EBFF>>
+:Уведомить клиента\n**NOTIFY_CUSTOMER**; <<#D3F9D8>>
+
+stop
+
+legend
+  |= Цвет |= Элемент |
+  |<#D3F9D8> | Транзакция |
+  |<#D0EBFF> | Состояние |
+  |<#FFE8CC> | Событие |
+endlegend
+
+@enduml
