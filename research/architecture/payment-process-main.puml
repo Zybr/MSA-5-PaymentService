@@ -1,0 +1,111 @@
+@startuml payment-process-main
+
+!include https://raw.githubusercontent.com/Ilase/BPMN-PlantUML-Plugin/9febedc4ff0f31736ed9e157398ad3900e78d615/bpmn/BPMN.puml
+
+top to bottom direction
+skinparam backgroundColor white
+skinparam defaultFontName Arial
+skinparam defaultFontSize 14
+skinparam nodesep 35
+skinparam ranksep 35
+skinparam linetype ortho
+skinparam diamondBackgroundColor #FFF3BF
+skinparam diamondBorderColor #F08C00
+skinparam circleBackgroundColor #E6FCF5
+skinparam circleBorderColor #2B8A3E
+
+!unquoted procedure PaymentTask($alias, $label)
+rectangle "$label\n<color:#9A3412>[Payment Service]</color>" as $alias #FFF4E6
+!endprocedure
+
+!unquoted procedure CheckSubProcess($alias, $label)
+rectangle "$label\n<color:#1C5D99>[Subprocess +]</color>" as $alias #E7F5FF
+!endprocedure
+
+!unquoted procedure CompensationTask($alias, $label)
+rectangle "$label\n<color:#A61E1E>[Compensation]</color>" as $alias #FFE3E3
+!endprocedure
+
+!unquoted procedure NotificationTask($alias, $label)
+rectangle "$label\n<color:#2B8A3E>[Notification Service]</color>" as $alias #EBFBEE
+!endprocedure
+
+!unquoted procedure QuestionFor($alias, $text)
+note top of $alias
+$text
+end note
+!endprocedure
+
+BPMN_TITLE("1. Основной процесс обработки платежа")
+
+StartEvent(payment_started, "Платёж инициирован")
+PaymentTask(create_payment, "Создать платёж\n<font:monospaced>CREATE_PAYMENT</font>")
+PaymentTask(debit_customer, "Списать деньги клиента\n<font:monospaced>DEBIT_CUSTOMER_ACCOUNT</font>")
+ExclusiveGateway(debit_result, "X")
+NotificationTask(notify_debit_failed, "Уведомить об ошибке\n<font:monospaced>NOTIFY_CUSTOMER</font>")
+EndEvent(payment_failed, "Платёж не выполнен")
+
+CheckSubProcess(run_checks, "Выполнить проверки параллельно\nFraud / Compliance / Limits\ncut-off → ALLOW")
+ExclusiveGateway(checks_result, "X")
+
+PaymentTask(credit_counterparty, "PIVOT при успехе\nЗачислить деньги контрагенту\n<font:monospaced>CREDIT_COUNTERPARTY_ACCOUNT</font>")
+ExclusiveGateway(credit_result, "X")
+NotificationTask(notify_success, "Уведомить об успехе\n<font:monospaced>NOTIFY_CUSTOMER</font>")
+EndEvent(payment_completed, "Платёж выполнен")
+
+ExclusiveGateway(rejection_reason, "X")
+ParallelGateway(compensation_split, "+")
+CompensationTask(refund_fraud, "Автоматически вернуть деньги\n<font:monospaced>REFUND_CUSTOMER_ACCOUNT</font>\nretry до успеха")
+NotificationTask(notify_security, "Уведомить безопасность\n<font:monospaced>NOTIFY_SECURITY</font>")
+ParallelGateway(compensation_join, "+")
+NotificationTask(notify_fraud_refund, "Уведомить о возврате\n<font:monospaced>NOTIFY_CUSTOMER</font>")
+EndEvent(fraud_refunded, "Деньги возвращены")
+
+ExclusiveGateway(refund_merge, "XOR")
+CompensationTask(refund_customer, "Автоматически вернуть деньги\n<font:monospaced>REFUND_CUSTOMER_ACCOUNT</font>\nretry до успеха")
+NotificationTask(notify_refund, "Уведомить о возврате\n<font:monospaced>NOTIFY_CUSTOMER</font>")
+EndEvent(payment_refunded, "Деньги возвращены")
+
+QuestionFor(debit_result, "Списание успешно?")
+QuestionFor(checks_result, "Есть запрет?")
+QuestionFor(credit_result, "Зачисление успешно?")
+QuestionFor(rejection_reason, "FraudCheck вернул DENY?")
+
+Flow(payment_started, create_payment)
+Flow(create_payment, debit_customer)
+Flow(debit_customer, debit_result)
+Flow_R(debit_result, notify_debit_failed, "нет")
+Flow(notify_debit_failed, payment_failed)
+Flow(debit_result, run_checks, "да")
+Flow(run_checks, checks_result)
+
+Flow(checks_result, credit_counterparty, "нет")
+Flow(credit_counterparty, credit_result)
+Flow(credit_result, notify_success, "да")
+Flow(notify_success, payment_completed)
+
+Flow_R(checks_result, rejection_reason, "да")
+Flow(rejection_reason, compensation_split, "да")
+Flow_L(compensation_split, refund_fraud)
+Flow_R(compensation_split, notify_security)
+Flow(refund_fraud, compensation_join)
+Flow(notify_security, compensation_join)
+Flow(compensation_join, notify_fraud_refund)
+Flow(notify_fraud_refund, fraud_refunded)
+
+Flow_R(rejection_reason, refund_merge, "нет")
+Flow_R(credit_result, refund_merge, "нет")
+Flow(refund_merge, refund_customer)
+Flow(refund_customer, notify_refund)
+Flow(notify_refund, payment_refunded)
+
+legend bottom
+|= Цвет |= Назначение шага |
+|<#FFF4E6> | Платёжная операция |
+|<#E7F5FF> | Проверка или подпроцесс |
+|<#FFE3E3> | Компенсация или отказ |
+|<#EBFBEE> | Уведомление |
+|<#FFF3BF> | BPMN-шлюз |
+endlegend
+
+@enduml

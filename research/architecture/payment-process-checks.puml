@@ -1,0 +1,73 @@
+@startuml payment-process-checks
+
+!include https://raw.githubusercontent.com/Ilase/BPMN-PlantUML-Plugin/9febedc4ff0f31736ed9e157398ad3900e78d615/bpmn/BPMN.puml
+
+top to bottom direction
+skinparam backgroundColor white
+skinparam defaultFontName Arial
+skinparam defaultFontSize 14
+skinparam nodesep 35
+skinparam ranksep 35
+skinparam linetype ortho
+skinparam diamondBackgroundColor #FFF3BF
+skinparam diamondBorderColor #F08C00
+skinparam circleBackgroundColor #E6FCF5
+skinparam circleBorderColor #2B8A3E
+
+!unquoted procedure CheckTask($alias, $label)
+rectangle "$label\n<color:#1C5D99>[Check Service]</color>" as $alias #E7F5FF
+!endprocedure
+
+!unquoted procedure DecisionTask($alias, $label)
+rectangle "$label" as $alias #FFE3E3
+!endprocedure
+
+!unquoted procedure QuestionFor($alias, $text)
+note top of $alias
+$text
+end note
+!endprocedure
+
+BPMN_TITLE("2. Подпроцесс параллельных проверок")
+
+StartEvent(checks_started, "Деньги списаны")
+ParallelGateway(checks_split, "+")
+CheckTask(check_fraud, "Антифрод-проверка\n<font:monospaced>CHECK_FRAUD</font>\ncut-off → ALLOW")
+CheckTask(check_compliance, "Compliance-проверка\n<font:monospaced>CHECK_COMPLIANCE</font>\ncut-off → ALLOW")
+CheckTask(check_limits, "Проверка ограничений\n<font:monospaced>CHECK_LIMITS</font>\ncut-off → ALLOW")
+
+ExclusiveGateway(fraud_decision, "X")
+DecisionTask(fraud_denied, "Зафиксировать\nDENY")
+CheckTask(manual_wait, "Ожидать ручное решение\nне более 20 минут\nALLOW / DENY\ncut-off → ALLOW")
+ExclusiveGateway(fraud_merge, "XOR")
+
+ParallelGateway(checks_join, "+")
+ExclusiveGateway(detailed_checks_result, "X")
+EndEvent(checks_approved, "APPROVED")
+EndEvent(checks_rejected, "REJECTED")
+
+QuestionFor(fraud_decision, "Решение FraudCheck")
+QuestionFor(detailed_checks_result, "Есть запрет?")
+
+Flow(checks_started, checks_split)
+Flow(checks_split, check_fraud)
+Flow(checks_split, check_compliance)
+Flow(checks_split, check_limits)
+check_fraud -[hidden]right- check_compliance
+check_compliance -[hidden]right- check_limits
+
+Flow(check_fraud, fraud_decision)
+Flow(fraud_decision, fraud_merge, "ALLOW")
+Flow_D(fraud_decision, fraud_denied, "DENY")
+Flow(fraud_denied, fraud_merge)
+Flow_D(fraud_decision, manual_wait, "MANUAL_REVIEW")
+Flow(manual_wait, fraud_merge, "результат")
+
+Flow(fraud_merge, checks_join)
+Flow(check_compliance, checks_join)
+Flow(check_limits, checks_join)
+Flow(checks_join, detailed_checks_result)
+Flow(detailed_checks_result, checks_approved, "нет")
+Flow_R(detailed_checks_result, checks_rejected, "да")
+
+@enduml

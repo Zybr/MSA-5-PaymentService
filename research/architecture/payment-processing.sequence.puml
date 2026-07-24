@@ -1,0 +1,162 @@
+@startuml
+
+title Обработка платежа в Java-сервисе и Camunda
+
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam sequenceMessageAlign center
+skinparam ParticipantPadding 22
+skinparam BoxPadding 12
+skinparam ArrowColor #495057
+skinparam LifeLineBorderColor #868E96
+skinparam LifeLineBackgroundColor #F8F9FA
+skinparam ParticipantBorderColor #495057
+skinparam ParticipantFontColor #212529
+skinparam NoteBorderColor #868E96
+skinparam NoteBackgroundColor #FFF9DB
+skinparam GroupBorderColor #868E96
+skinparam GroupBackgroundColor #F8F9FA
+autonumber
+
+actor "Клиент" as client #F1F3F5
+
+box "payment-orchestrator (Java)" #F8F9FA
+  participant "PaymentHttpServer" as api #E7F5FF
+  participant "PaymentProcessService" as service #E7F5FF
+  participant "PaymentScenario" as scenario #EBFBEE
+  database "PaymentRepository\n(in-memory)" as repository #FFF4E6
+  participant "PaymentState" as state #EBFBEE
+  participant "PaymentWorkers" as workers #E7F5FF
+end box
+
+participant "ZeebeClient" as zeebe #F3F0FF
+participant "Camunda / Zeebe\npayment-process" as camunda #F3F0FF
+
+client -> api: POST /payments\n{scenario, cutOffDuration}
+activate api
+api -> service: start(scenario, cutOffDuration)
+activate service
+service -> scenario: from(scenario)
+scenario --> service: PaymentScenario
+create state
+service -> state: new(paymentId, operationId, scenario)
+service -> repository: save(state)
+service -> zeebe: newCreateInstanceCommand(variables)
+zeebe -> camunda: создать экземпляр payment-process
+camunda --> zeebe: processInstanceKey
+zeebe --> service: processInstanceKey
+service -> state: started(processInstanceKey)
+service --> api: PaymentState
+deactivate service
+api -> state: snapshot()
+state --> api: JSON model
+api --> client: 202 Accepted + paymentId
+deactivate api
+
+group Выполнение service tasks
+  camunda -> workers: activate create-payment
+  activate workers
+  workers -> repository: require(paymentId)
+  repository --> workers: PaymentState
+  workers -> state: mark(CREATED, PAYMENT_CREATED)
+  workers -> camunda: complete(job)
+
+  camunda -> workers: activate debit-customer-account
+  alt Списание успешно
+    workers -> state: mark(FUNDS_DEBITED, DEBIT_SUCCEEDED)
+    workers -> camunda: complete(job, debitSucceeded=true)
+  else Ошибка списания
+    workers -> state: mark(FAILED, DEBIT_FAILED)
+    workers -> camunda: complete(job, debitSucceeded=false)
+    camunda -> workers: activate notify-customer-failure
+    workers -> state: mark(FAILED, CUSTOMER_NOTIFIED_FAILURE)
+    workers -> camunda: complete(job)
+    note over workers, camunda
+      Эта ветка завершается сразу;
+      следующие шаги относятся к успешному списанию.
+    end note
+  end
+
+  par Антифрод
+    camunda -> workers: activate check-fraud
+    workers -> state: add(FRAUD_*)
+    workers -> camunda: complete(job, fraudDecision)
+  else Compliance
+    camunda -> workers: activate check-compliance
+    workers -> state: add(COMPLIANCE_*)
+    workers -> camunda: complete(job, complianceDenied)
+  else Лимиты
+    camunda -> workers: activate check-limits
+    workers -> state: add(LIMITS_*)
+    workers -> camunda: complete(job, limitsDenied)
+  end
+
+  alt Проверки разрешили платёж
+    note over camunda
+      Процесс сразу переходит
+      к зачислению средств
+    end note
+  else Требуется ручная проверка
+    workers -> state: mark(MANUAL_REVIEW_PENDING, MANUAL_REVIEW_REQUIRED)
+    alt Решение поступило через HTTP
+      client -> api: POST /payments/{id}/review\n{decision: ALLOW | DENY}
+      api -> repository: find(paymentId)
+      repository --> api: PaymentState
+      api -> service: completeManualReview(state, decision)
+      service -> zeebe: publishMessage(manual-review-result)
+      zeebe -> camunda: корреляция по paymentId
+      service -> state: add(MANUAL_DECISION_*_SENT)
+      api --> client: 202 Accepted
+      camunda -> workers: activate record-manual-review
+      workers -> state: mark(APPROVED | REJECTED, MANUAL_REVIEW_*)
+      workers -> camunda: complete(job)
+    else Истёк cut-off
+      camunda -> camunda: timer(cutOffDuration)
+      camunda -> workers: activate approve-by-cutoff
+      workers -> state: mark(APPROVED, CUT_OFF_EXPIRED)
+      workers -> camunda: complete(job, fraudDenied=false)
+    end
+  end
+
+  alt Проверка отклонена
+    camunda -> workers: activate refund-customer-account
+    workers -> state: mark(REFUND_PENDING, REFUND_SUCCEEDED)
+    workers -> camunda: complete(job)
+    camunda -> workers: activate notify-security
+    workers -> state: add(SECURITY_NOTIFIED)
+    workers -> camunda: complete(job)
+    camunda -> workers: activate notify-customer-refund
+    workers -> state: mark(REFUNDED, CUSTOMER_NOTIFIED_REFUND)
+    workers -> camunda: complete(job)
+  else Проверка разрешена
+    camunda -> workers: activate credit-counterparty-account
+    workers -> state: mark(CREDIT_PENDING, CREDIT_SUCCEEDED | CREDIT_FAILED)
+    workers -> camunda: complete(job, creditSucceeded)
+    alt Зачисление успешно (pivot пройден)
+      camunda -> workers: activate notify-customer-success
+      workers -> state: mark(COMPLETED, CUSTOMER_NOTIFIED_SUCCESS)
+      workers -> camunda: complete(job)
+    else Ошибка зачисления
+      camunda -> workers: activate refund-customer-account
+      workers -> state: mark(REFUND_PENDING, REFUND_SUCCEEDED)
+      workers -> camunda: complete(job)
+      camunda -> workers: activate notify-customer-refund
+      workers -> state: mark(REFUNDED, CUSTOMER_NOTIFIED_REFUND)
+      workers -> camunda: complete(job)
+    end
+  end
+  deactivate workers
+end
+
+client -> api: GET /payments/{paymentId}
+activate api
+api -> repository: find(paymentId)
+repository --> api: PaymentState
+api -> state: snapshot()
+state --> api: status + history
+api --> client: 200 OK\nCOMPLETED | REFUNDED | FAILED
+deactivate api
+
+@enduml

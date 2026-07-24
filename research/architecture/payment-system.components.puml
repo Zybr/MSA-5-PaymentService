@@ -1,0 +1,95 @@
+@startuml
+
+title Компоненты платёжной системы OrchestrPay
+
+top to bottom direction
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 14
+skinparam componentStyle rectangle
+skinparam linetype polyline
+skinparam nodesep 40
+skinparam ranksep 55
+skinparam ArrowColor #495057
+skinparam ArrowFontColor #343A40
+skinparam packageBorderColor #868E96
+skinparam packageBackgroundColor #F8F9FA
+skinparam databaseBorderColor #5F3DC4
+skinparam databaseBackgroundColor #F3F0FF
+skinparam collectionsBorderColor #5F3DC4
+skinparam collectionsBackgroundColor #F3F0FF
+
+actor "Клиент" as customer
+component "Marketplace" as marketplace #F1F3F5
+
+package "OrchestrPay" {
+  package "Управление процессом" {
+    component "Payment Orchestrator\nService" as orchestrator #E7F5FF
+    component "Camunda / Zeebe\nBPMN и состояние Saga" as camunda #F3F0FF
+  }
+
+  package "Доменные возможности" {
+    component "Payment Service\nсписание / зачисление / возврат" as payment #FFF4E6
+    component "FraudCheck Service\nавтоматическое и ручное решение" as fraud #E7F5FF
+    component "Compliance Service\nвне реализации задания" as compliance #E7F5FF
+    component "Limit Control Service\nвне реализации задания" as limits #E7F5FF
+    component "Notification Service\nуведомления" as notification #EBFBEE
+  }
+
+  package "Данные и наблюдаемость" {
+    database "PostgreSQL\nплатежи и журнал операций" as postgres
+    collections "Redis\nрешения, лимиты и статусы" as redis
+    component "Monitoring & Tracing\nметрики / логи / трассировки" as observability #F3F0FF
+  }
+}
+
+package "Внешние системы" {
+  component "Банк / Payment Gateway" as bank #F1F3F5
+  component "AML / GeoRisk providers" as risk_providers #F1F3F5
+  component "Email / SMS / Push" as channels #F1F3F5
+  component "Система безопасности" as security #F1F3F5
+}
+
+customer --> marketplace : заказ и платёж
+marketplace --> orchestrator : Payment API
+
+orchestrator -right-> camunda
+orchestrator --> payment
+orchestrator --> fraud
+orchestrator --> compliance
+orchestrator --> limits
+orchestrator --> notification
+
+payment -[hidden]right- fraud
+fraud -[hidden]right- compliance
+compliance -[hidden]right- limits
+limits -[hidden]right- notification
+
+payment --> postgres
+payment --> bank : финансовые операции
+fraud --> redis
+fraud --> risk_providers : внешняя проверка
+limits --> redis
+notification --> channels : сообщение клиенту
+notification --> security : fraud alert
+
+orchestrator ..> observability : телеметрия
+
+postgres -[hidden]right- redis
+redis -[hidden]right- observability
+bank -[hidden]right- risk_providers
+risk_providers -[hidden]right- channels
+channels -[hidden]right- security
+observability -[hidden]down- bank
+
+legend bottom
+|= Цвет |= Компонент |
+|<#E7F5FF> | Оркестрация или проверка |
+|<#FFF4E6> | Платёжные операции |
+|<#EBFBEE> | Уведомления |
+|<#F3F0FF> | Инфраструктура |
+|<#F1F3F5> | Внешняя система |
+endlegend
+
+@enduml

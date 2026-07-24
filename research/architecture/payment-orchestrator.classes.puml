@@ -1,0 +1,159 @@
+@startuml
+
+title Структура Java-сервиса Payment Orchestrator
+
+left to right direction
+skinparam backgroundColor white
+skinparam shadowing false
+skinparam defaultFontName Arial
+skinparam defaultFontSize 13
+skinparam classAttributeIconSize 0
+skinparam linetype polyline
+skinparam nodesep 45
+skinparam ranksep 55
+skinparam ArrowColor #495057
+skinparam ArrowFontColor #343A40
+skinparam packageBorderColor #868E96
+skinparam packageBackgroundColor #F8F9FA
+skinparam classBorderColor #495057
+skinparam classFontColor #212529
+skinparam classBackgroundColor #FFFFFF
+hide empty members
+
+package "bootstrap" #F8F9FA {
+  class PaymentApplication <<entry point>> #FFF4E6 {
+    +main(args: String[]): void
+    -env(name: String, defaultValue: String): String
+  }
+}
+
+package "api" #F8F9FA {
+  class PaymentHttpServer <<HTTP API>> #E7F5FF {
+    -repository: PaymentRepository
+    -processService: PaymentProcessService
+    -server: HttpServer
+    +start(): void
+    -handleHealth(exchange: HttpExchange): void
+    -handlePayments(exchange: HttpExchange): void
+    -startPayment(exchange: HttpExchange): void
+    -completeManualReview(exchange: HttpExchange, paymentId: String): void
+    +close(): void
+  }
+}
+
+package "service" #F8F9FA {
+  class PaymentProcessService <<application service>> #E7F5FF {
+    -zeebe: ZeebeClient
+    -repository: PaymentRepository
+    -scheduler: ScheduledExecutorService
+    +start(scenario: String, cutOffDuration: String): PaymentState
+    +completeManualReview(payment: PaymentState, decision: String): void
+    -publishManualReview(payment: PaymentState, denied: boolean): void
+    +close(): void
+  }
+}
+
+package "worker" #F8F9FA {
+  class PaymentWorkers <<Zeebe workers>> #E7F5FF {
+    -zeebe: ZeebeClient
+    -repository: PaymentRepository
+    -workers: List<JobWorker>
+    +start(): void
+    -openWorker(jobType: String, action: WorkerAction): void
+    -state(job: ActivatedJob): PaymentState
+    +close(): void
+  }
+
+  interface WorkerAction #E7F5FF {
+    +execute(job: ActivatedJob): Map
+  }
+}
+
+package "domain" #F8F9FA {
+  class PaymentState <<aggregate>> #EBFBEE {
+    -paymentId: String
+    -operationId: String
+    -scenario: PaymentScenario
+    -processInstanceKey: long
+    -status: String
+    -history: List<String>
+    +started(key: long): void
+    +mark(status: String, event: String): void
+    +add(event: String): void
+    +snapshot(): Map
+  }
+
+  enum PaymentScenario #EBFBEE {
+    SUCCESS
+    DEBIT_FAILURE
+    FRAUD_DENY
+    MANUAL_REVIEW
+    MANUAL_ALLOW
+    MANUAL_DENY
+    CUTOFF
+    COMPLIANCE_DENY
+    LIMITS_DENY
+    CREDIT_FAILURE
+    +from(value: String): PaymentScenario
+    +value(): String
+  }
+}
+
+package "repository" #F8F9FA {
+  class PaymentRepository <<in-memory repository>> #FFF4E6 {
+    -payments: ConcurrentHashMap<String, PaymentState>
+    +save(payment: PaymentState): void
+    +find(paymentId: String): PaymentState
+    +require(paymentId: String): PaymentState
+    +findAll(): Collection<PaymentState>
+  }
+}
+
+package "infrastructure" #F8F9FA {
+  class ZeebeConnector <<factory>> #F3F0FF {
+    +connect(address: String): ZeebeClient
+  }
+}
+
+package "External libraries" #F8F9FA {
+  class HttpServer <<JDK>> #F1F3F5
+  class ZeebeClient <<Camunda client>> #F3F0FF
+  class JobWorker <<Camunda client>> #F3F0FF
+}
+
+class "Camunda / Zeebe\nBPMN engine" as camunda <<external>> #F3F0FF
+
+PaymentApplication ..> ZeebeConnector : создаёт клиент
+PaymentApplication ..> PaymentRepository : создаёт
+PaymentApplication ..> PaymentProcessService : создаёт
+PaymentApplication ..> PaymentWorkers : запускает
+PaymentApplication ..> PaymentHttpServer : запускает
+
+PaymentHttpServer *--> HttpServer
+PaymentHttpServer --> PaymentProcessService
+PaymentHttpServer --> PaymentRepository
+PaymentProcessService --> PaymentRepository
+PaymentProcessService --> PaymentState
+PaymentProcessService --> PaymentScenario
+PaymentProcessService --> ZeebeClient
+PaymentWorkers --> PaymentRepository
+PaymentWorkers --> PaymentState
+PaymentWorkers --> PaymentScenario
+PaymentWorkers *--> "0..*" JobWorker
+PaymentWorkers ..> WorkerAction
+PaymentRepository o--> "0..*" PaymentState
+PaymentState --> "1" PaymentScenario
+ZeebeConnector ..> ZeebeClient : подключает
+ZeebeClient --> camunda : gRPC
+JobWorker ..> camunda : получает задания
+
+legend bottom
+|= Цвет |= Ответственность |
+|<#E7F5FF> | API, прикладная логика и воркеры |
+|<#EBFBEE> | Доменная модель |
+|<#FFF4E6> | Точка входа и хранение состояния |
+|<#F3F0FF> | Интеграция с Camunda |
+|<#F1F3F5> | Классы стандартной/внешней библиотеки |
+endlegend
+
+@enduml
