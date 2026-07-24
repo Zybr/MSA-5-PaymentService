@@ -1,0 +1,346 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:zeebe="http://camunda.org/schema/zeebe/1.0"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_Payment"
+                  targetNamespace="http://example.com/payment">
+
+  <bpmn:message id="Message_ManualReview" name="manual-review-result">
+    <bpmn:extensionElements>
+      <zeebe:subscription correlationKey="= paymentId" />
+    </bpmn:extensionElements>
+  </bpmn:message>
+
+  <bpmn:process id="payment-process" name="Обработка платежа" isExecutable="true">
+    <bpmn:startEvent id="StartEvent_Payment" name="Платёж получен">
+      <bpmn:outgoing>Flow_Start_Create</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:serviceTask id="Task_Create" name="Создать платёж">
+      <bpmn:extensionElements><zeebe:taskDefinition type="create-payment" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Start_Create</bpmn:incoming>
+      <bpmn:outgoing>Flow_Create_Debit</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_Debit" name="Списать средства">
+      <bpmn:extensionElements><zeebe:taskDefinition type="debit-customer-account" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Create_Debit</bpmn:incoming>
+      <bpmn:outgoing>Flow_Debit_Result</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_Debit" name="Списание успешно?" default="Flow_Debit_Failed">
+      <bpmn:incoming>Flow_Debit_Result</bpmn:incoming>
+      <bpmn:outgoing>Flow_Debit_Success</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Debit_Failed</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="Task_NotifyFailure" name="Уведомить об ошибке">
+      <bpmn:extensionElements><zeebe:taskDefinition type="notify-customer-failure" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Debit_Failed</bpmn:incoming>
+      <bpmn:outgoing>Flow_NotifyFailure_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_Failed" name="Платёж не выполнен">
+      <bpmn:incoming>Flow_NotifyFailure_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:parallelGateway id="Gateway_ChecksSplit" name="Параллельные проверки">
+      <bpmn:incoming>Flow_Debit_Success</bpmn:incoming>
+      <bpmn:outgoing>Flow_Split_Fraud</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Split_Compliance</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Split_Limits</bpmn:outgoing>
+    </bpmn:parallelGateway>
+
+    <bpmn:serviceTask id="Task_Fraud" name="Антифрод-проверка">
+      <bpmn:extensionElements><zeebe:taskDefinition type="check-fraud" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Split_Fraud</bpmn:incoming>
+      <bpmn:outgoing>Flow_Fraud_Decision</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_FraudDecision" name="Решение антифрода" default="Flow_Fraud_Resolved">
+      <bpmn:incoming>Flow_Fraud_Decision</bpmn:incoming>
+      <bpmn:outgoing>Flow_Fraud_Manual</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Fraud_Resolved</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:eventBasedGateway id="Gateway_ManualWait" name="Решение или cut-off">
+      <bpmn:incoming>Flow_Fraud_Manual</bpmn:incoming>
+      <bpmn:outgoing>Flow_Wait_Message</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Wait_Timer</bpmn:outgoing>
+    </bpmn:eventBasedGateway>
+
+    <bpmn:intermediateCatchEvent id="Catch_ManualReview" name="Ручное решение">
+      <bpmn:incoming>Flow_Wait_Message</bpmn:incoming>
+      <bpmn:outgoing>Flow_Message_Record</bpmn:outgoing>
+      <bpmn:messageEventDefinition messageRef="Message_ManualReview" />
+    </bpmn:intermediateCatchEvent>
+
+    <bpmn:serviceTask id="Task_RecordReview" name="Записать ручное решение">
+      <bpmn:extensionElements><zeebe:taskDefinition type="record-manual-review" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Message_Record</bpmn:incoming>
+      <bpmn:outgoing>Flow_Record_Merge</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:intermediateCatchEvent id="Catch_Cutoff" name="Cut-off 20 минут">
+      <bpmn:incoming>Flow_Wait_Timer</bpmn:incoming>
+      <bpmn:outgoing>Flow_Timer_Approve</bpmn:outgoing>
+      <bpmn:timerEventDefinition>
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">= cutOffDuration</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+
+    <bpmn:serviceTask id="Task_ApproveCutoff" name="Разрешить по cut-off">
+      <bpmn:extensionElements><zeebe:taskDefinition type="approve-by-cutoff" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Timer_Approve</bpmn:incoming>
+      <bpmn:outgoing>Flow_Approve_Merge</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_FraudMerge">
+      <bpmn:incoming>Flow_Fraud_Resolved</bpmn:incoming>
+      <bpmn:incoming>Flow_Record_Merge</bpmn:incoming>
+      <bpmn:incoming>Flow_Approve_Merge</bpmn:incoming>
+      <bpmn:outgoing>Flow_Fraud_Join</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="Task_Compliance" name="Compliance-проверка">
+      <bpmn:extensionElements><zeebe:taskDefinition type="check-compliance" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Split_Compliance</bpmn:incoming>
+      <bpmn:outgoing>Flow_Compliance_Join</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_Limits" name="Проверить лимиты">
+      <bpmn:extensionElements><zeebe:taskDefinition type="check-limits" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Split_Limits</bpmn:incoming>
+      <bpmn:outgoing>Flow_Limits_Join</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:parallelGateway id="Gateway_ChecksJoin" name="Проверки завершены">
+      <bpmn:incoming>Flow_Fraud_Join</bpmn:incoming>
+      <bpmn:incoming>Flow_Compliance_Join</bpmn:incoming>
+      <bpmn:incoming>Flow_Limits_Join</bpmn:incoming>
+      <bpmn:outgoing>Flow_Join_Result</bpmn:outgoing>
+    </bpmn:parallelGateway>
+
+    <bpmn:exclusiveGateway id="Gateway_CheckResult" name="Есть отказ?" default="Flow_Checks_Approved">
+      <bpmn:incoming>Flow_Join_Result</bpmn:incoming>
+      <bpmn:outgoing>Flow_Checks_Denied</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Checks_Approved</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="Task_Credit" name="Зачислить контрагенту (pivot)">
+      <bpmn:extensionElements><zeebe:taskDefinition type="credit-counterparty-account" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Checks_Approved</bpmn:incoming>
+      <bpmn:outgoing>Flow_Credit_Result</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:exclusiveGateway id="Gateway_Credit" name="Зачисление успешно?" default="Flow_Credit_Failed">
+      <bpmn:incoming>Flow_Credit_Result</bpmn:incoming>
+      <bpmn:outgoing>Flow_Credit_Success</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Credit_Failed</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="Task_NotifySuccess" name="Уведомить об успехе">
+      <bpmn:extensionElements><zeebe:taskDefinition type="notify-customer-success" retries="3" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Credit_Success</bpmn:incoming>
+      <bpmn:outgoing>Flow_NotifySuccess_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_Completed" name="Платёж выполнен">
+      <bpmn:incoming>Flow_NotifySuccess_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:exclusiveGateway id="Gateway_RejectionType" name="Отказ антифрода?" default="Flow_OtherDenied_Refund">
+      <bpmn:incoming>Flow_Checks_Denied</bpmn:incoming>
+      <bpmn:outgoing>Flow_FraudDenied_Split</bpmn:outgoing>
+      <bpmn:outgoing>Flow_OtherDenied_Refund</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:parallelGateway id="Gateway_SecuritySplit">
+      <bpmn:incoming>Flow_FraudDenied_Split</bpmn:incoming>
+      <bpmn:outgoing>Flow_Security_Refund</bpmn:outgoing>
+      <bpmn:outgoing>Flow_Security_Notify</bpmn:outgoing>
+    </bpmn:parallelGateway>
+
+    <bpmn:serviceTask id="Task_RefundFraud" name="Вернуть средства">
+      <bpmn:extensionElements><zeebe:taskDefinition type="refund-customer-account" retries="5" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Security_Refund</bpmn:incoming>
+      <bpmn:outgoing>Flow_RefundFraud_Join</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_NotifySecurity" name="Уведомить безопасность">
+      <bpmn:extensionElements><zeebe:taskDefinition type="notify-security" retries="5" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_Security_Notify</bpmn:incoming>
+      <bpmn:outgoing>Flow_NotifySecurity_Join</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:parallelGateway id="Gateway_SecurityJoin">
+      <bpmn:incoming>Flow_RefundFraud_Join</bpmn:incoming>
+      <bpmn:incoming>Flow_NotifySecurity_Join</bpmn:incoming>
+      <bpmn:outgoing>Flow_SecurityJoin_Notify</bpmn:outgoing>
+    </bpmn:parallelGateway>
+
+    <bpmn:serviceTask id="Task_NotifyFraudRefund" name="Уведомить о возврате">
+      <bpmn:extensionElements><zeebe:taskDefinition type="notify-customer-refund" retries="5" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_SecurityJoin_Notify</bpmn:incoming>
+      <bpmn:outgoing>Flow_NotifyFraudRefund_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_FraudRefunded" name="Средства возвращены">
+      <bpmn:incoming>Flow_NotifyFraudRefund_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:exclusiveGateway id="Gateway_RefundMerge">
+      <bpmn:incoming>Flow_OtherDenied_Refund</bpmn:incoming>
+      <bpmn:incoming>Flow_Credit_Failed</bpmn:incoming>
+      <bpmn:outgoing>Flow_RefundMerge_Refund</bpmn:outgoing>
+    </bpmn:exclusiveGateway>
+
+    <bpmn:serviceTask id="Task_RefundGeneral" name="Автоматический возврат">
+      <bpmn:extensionElements><zeebe:taskDefinition type="refund-customer-account" retries="5" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_RefundMerge_Refund</bpmn:incoming>
+      <bpmn:outgoing>Flow_RefundGeneral_Notify</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:serviceTask id="Task_NotifyGeneralRefund" name="Уведомить о возврате">
+      <bpmn:extensionElements><zeebe:taskDefinition type="notify-customer-refund" retries="5" /></bpmn:extensionElements>
+      <bpmn:incoming>Flow_RefundGeneral_Notify</bpmn:incoming>
+      <bpmn:outgoing>Flow_NotifyGeneralRefund_End</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="EndEvent_GeneralRefunded" name="Средства возвращены">
+      <bpmn:incoming>Flow_NotifyGeneralRefund_End</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="Flow_Start_Create" sourceRef="StartEvent_Payment" targetRef="Task_Create" />
+    <bpmn:sequenceFlow id="Flow_Create_Debit" sourceRef="Task_Create" targetRef="Task_Debit" />
+    <bpmn:sequenceFlow id="Flow_Debit_Result" sourceRef="Task_Debit" targetRef="Gateway_Debit" />
+    <bpmn:sequenceFlow id="Flow_Debit_Success" name="да" sourceRef="Gateway_Debit" targetRef="Gateway_ChecksSplit">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">= debitSucceeded</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_Debit_Failed" name="нет" sourceRef="Gateway_Debit" targetRef="Task_NotifyFailure" />
+    <bpmn:sequenceFlow id="Flow_NotifyFailure_End" sourceRef="Task_NotifyFailure" targetRef="EndEvent_Failed" />
+    <bpmn:sequenceFlow id="Flow_Split_Fraud" sourceRef="Gateway_ChecksSplit" targetRef="Task_Fraud" />
+    <bpmn:sequenceFlow id="Flow_Split_Compliance" sourceRef="Gateway_ChecksSplit" targetRef="Task_Compliance" />
+    <bpmn:sequenceFlow id="Flow_Split_Limits" sourceRef="Gateway_ChecksSplit" targetRef="Task_Limits" />
+    <bpmn:sequenceFlow id="Flow_Fraud_Decision" sourceRef="Task_Fraud" targetRef="Gateway_FraudDecision" />
+    <bpmn:sequenceFlow id="Flow_Fraud_Manual" name="ручная проверка" sourceRef="Gateway_FraudDecision" targetRef="Gateway_ManualWait">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">= fraudDecision = "MANUAL_REVIEW"</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_Fraud_Resolved" name="ALLOW / DENY" sourceRef="Gateway_FraudDecision" targetRef="Gateway_FraudMerge" />
+    <bpmn:sequenceFlow id="Flow_Wait_Message" sourceRef="Gateway_ManualWait" targetRef="Catch_ManualReview" />
+    <bpmn:sequenceFlow id="Flow_Wait_Timer" sourceRef="Gateway_ManualWait" targetRef="Catch_Cutoff" />
+    <bpmn:sequenceFlow id="Flow_Message_Record" sourceRef="Catch_ManualReview" targetRef="Task_RecordReview" />
+    <bpmn:sequenceFlow id="Flow_Record_Merge" sourceRef="Task_RecordReview" targetRef="Gateway_FraudMerge" />
+    <bpmn:sequenceFlow id="Flow_Timer_Approve" sourceRef="Catch_Cutoff" targetRef="Task_ApproveCutoff" />
+    <bpmn:sequenceFlow id="Flow_Approve_Merge" sourceRef="Task_ApproveCutoff" targetRef="Gateway_FraudMerge" />
+    <bpmn:sequenceFlow id="Flow_Fraud_Join" sourceRef="Gateway_FraudMerge" targetRef="Gateway_ChecksJoin" />
+    <bpmn:sequenceFlow id="Flow_Compliance_Join" sourceRef="Task_Compliance" targetRef="Gateway_ChecksJoin" />
+    <bpmn:sequenceFlow id="Flow_Limits_Join" sourceRef="Task_Limits" targetRef="Gateway_ChecksJoin" />
+    <bpmn:sequenceFlow id="Flow_Join_Result" sourceRef="Gateway_ChecksJoin" targetRef="Gateway_CheckResult" />
+    <bpmn:sequenceFlow id="Flow_Checks_Denied" name="да" sourceRef="Gateway_CheckResult" targetRef="Gateway_RejectionType">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">= fraudDenied or complianceDenied or limitsDenied</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_Checks_Approved" name="нет" sourceRef="Gateway_CheckResult" targetRef="Task_Credit" />
+    <bpmn:sequenceFlow id="Flow_Credit_Result" sourceRef="Task_Credit" targetRef="Gateway_Credit" />
+    <bpmn:sequenceFlow id="Flow_Credit_Success" name="да" sourceRef="Gateway_Credit" targetRef="Task_NotifySuccess">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">= creditSucceeded</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_Credit_Failed" name="нет" sourceRef="Gateway_Credit" targetRef="Gateway_RefundMerge" />
+    <bpmn:sequenceFlow id="Flow_NotifySuccess_End" sourceRef="Task_NotifySuccess" targetRef="EndEvent_Completed" />
+    <bpmn:sequenceFlow id="Flow_FraudDenied_Split" name="да" sourceRef="Gateway_RejectionType" targetRef="Gateway_SecuritySplit">
+      <bpmn:conditionExpression xsi:type="bpmn:tFormalExpression">= fraudDenied</bpmn:conditionExpression>
+    </bpmn:sequenceFlow>
+    <bpmn:sequenceFlow id="Flow_OtherDenied_Refund" name="нет" sourceRef="Gateway_RejectionType" targetRef="Gateway_RefundMerge" />
+    <bpmn:sequenceFlow id="Flow_Security_Refund" sourceRef="Gateway_SecuritySplit" targetRef="Task_RefundFraud" />
+    <bpmn:sequenceFlow id="Flow_Security_Notify" sourceRef="Gateway_SecuritySplit" targetRef="Task_NotifySecurity" />
+    <bpmn:sequenceFlow id="Flow_RefundFraud_Join" sourceRef="Task_RefundFraud" targetRef="Gateway_SecurityJoin" />
+    <bpmn:sequenceFlow id="Flow_NotifySecurity_Join" sourceRef="Task_NotifySecurity" targetRef="Gateway_SecurityJoin" />
+    <bpmn:sequenceFlow id="Flow_SecurityJoin_Notify" sourceRef="Gateway_SecurityJoin" targetRef="Task_NotifyFraudRefund" />
+    <bpmn:sequenceFlow id="Flow_NotifyFraudRefund_End" sourceRef="Task_NotifyFraudRefund" targetRef="EndEvent_FraudRefunded" />
+    <bpmn:sequenceFlow id="Flow_RefundMerge_Refund" sourceRef="Gateway_RefundMerge" targetRef="Task_RefundGeneral" />
+    <bpmn:sequenceFlow id="Flow_RefundGeneral_Notify" sourceRef="Task_RefundGeneral" targetRef="Task_NotifyGeneralRefund" />
+    <bpmn:sequenceFlow id="Flow_NotifyGeneralRefund_End" sourceRef="Task_NotifyGeneralRefund" targetRef="EndEvent_GeneralRefunded" />
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="BPMNDiagram_Payment">
+    <bpmndi:BPMNPlane id="BPMNPlane_Payment" bpmnElement="payment-process">
+      <bpmndi:BPMNShape id="Shape_Start" bpmnElement="StartEvent_Payment"><dc:Bounds x="50" y="340" width="36" height="36" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Create" bpmnElement="Task_Create"><dc:Bounds x="120" y="318" width="120" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Debit" bpmnElement="Task_Debit"><dc:Bounds x="290" y="318" width="120" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_GatewayDebit" bpmnElement="Gateway_Debit" isMarkerVisible="true"><dc:Bounds x="460" y="333" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_NotifyFailure" bpmnElement="Task_NotifyFailure"><dc:Bounds x="460" y="500" width="130" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_EndFailed" bpmnElement="EndEvent_Failed"><dc:Bounds x="640" y="522" width="36" height="36" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_ChecksSplit" bpmnElement="Gateway_ChecksSplit"><dc:Bounds x="610" y="333" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Fraud" bpmnElement="Task_Fraud"><dc:Bounds x="740" y="100" width="130" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_FraudDecision" bpmnElement="Gateway_FraudDecision" isMarkerVisible="true"><dc:Bounds x="910" y="115" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_ManualWait" bpmnElement="Gateway_ManualWait"><dc:Bounds x="1030" y="40" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_ManualReview" bpmnElement="Catch_ManualReview"><dc:Bounds x="1150" y="15" width="36" height="36" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_RecordReview" bpmnElement="Task_RecordReview"><dc:Bounds x="1230" y="0" width="140" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Cutoff" bpmnElement="Catch_Cutoff"><dc:Bounds x="1150" y="120" width="36" height="36" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_ApproveCutoff" bpmnElement="Task_ApproveCutoff"><dc:Bounds x="1230" y="98" width="140" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_FraudMerge" bpmnElement="Gateway_FraudMerge" isMarkerVisible="true"><dc:Bounds x="1410" y="115" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Compliance" bpmnElement="Task_Compliance"><dc:Bounds x="910" y="300" width="140" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Limits" bpmnElement="Task_Limits"><dc:Bounds x="910" y="500" width="140" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_ChecksJoin" bpmnElement="Gateway_ChecksJoin"><dc:Bounds x="1530" y="333" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_CheckResult" bpmnElement="Gateway_CheckResult" isMarkerVisible="true"><dc:Bounds x="1650" y="333" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_Credit" bpmnElement="Task_Credit"><dc:Bounds x="1780" y="220" width="150" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_GatewayCredit" bpmnElement="Gateway_Credit" isMarkerVisible="true"><dc:Bounds x="1970" y="235" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_NotifySuccess" bpmnElement="Task_NotifySuccess"><dc:Bounds x="2090" y="220" width="140" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_EndCompleted" bpmnElement="EndEvent_Completed"><dc:Bounds x="2280" y="242" width="36" height="36" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_RejectionType" bpmnElement="Gateway_RejectionType" isMarkerVisible="true"><dc:Bounds x="1780" y="445" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_RefundMerge" bpmnElement="Gateway_RefundMerge" isMarkerVisible="true"><dc:Bounds x="2040" y="355" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_RefundGeneral" bpmnElement="Task_RefundGeneral"><dc:Bounds x="2150" y="340" width="150" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_NotifyGeneralRefund" bpmnElement="Task_NotifyGeneralRefund"><dc:Bounds x="2350" y="340" width="150" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_EndGeneralRefunded" bpmnElement="EndEvent_GeneralRefunded"><dc:Bounds x="2550" y="362" width="36" height="36" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_SecuritySplit" bpmnElement="Gateway_SecuritySplit"><dc:Bounds x="1910" y="515" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_RefundFraud" bpmnElement="Task_RefundFraud"><dc:Bounds x="2040" y="470" width="140" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_NotifySecurity" bpmnElement="Task_NotifySecurity"><dc:Bounds x="2040" y="590" width="140" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_SecurityJoin" bpmnElement="Gateway_SecurityJoin"><dc:Bounds x="2230" y="515" width="50" height="50" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_NotifyFraudRefund" bpmnElement="Task_NotifyFraudRefund"><dc:Bounds x="2350" y="500" width="150" height="80" /></bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Shape_EndFraudRefunded" bpmnElement="EndEvent_FraudRefunded"><dc:Bounds x="2550" y="522" width="36" height="36" /></bpmndi:BPMNShape>
+
+      <bpmndi:BPMNEdge id="Edge_Start_Create" bpmnElement="Flow_Start_Create"><di:waypoint x="86" y="358" /><di:waypoint x="120" y="358" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Create_Debit" bpmnElement="Flow_Create_Debit"><di:waypoint x="240" y="358" /><di:waypoint x="290" y="358" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Debit_Result" bpmnElement="Flow_Debit_Result"><di:waypoint x="410" y="358" /><di:waypoint x="460" y="358" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Debit_Success" bpmnElement="Flow_Debit_Success"><di:waypoint x="510" y="358" /><di:waypoint x="610" y="358" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Debit_Failed" bpmnElement="Flow_Debit_Failed"><di:waypoint x="485" y="383" /><di:waypoint x="525" y="500" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_NotifyFailure_End" bpmnElement="Flow_NotifyFailure_End"><di:waypoint x="590" y="540" /><di:waypoint x="640" y="540" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Split_Fraud" bpmnElement="Flow_Split_Fraud"><di:waypoint x="635" y="333" /><di:waypoint x="740" y="140" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Split_Compliance" bpmnElement="Flow_Split_Compliance"><di:waypoint x="660" y="358" /><di:waypoint x="910" y="340" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Split_Limits" bpmnElement="Flow_Split_Limits"><di:waypoint x="635" y="383" /><di:waypoint x="910" y="540" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Fraud_Decision" bpmnElement="Flow_Fraud_Decision"><di:waypoint x="870" y="140" /><di:waypoint x="910" y="140" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Fraud_Manual" bpmnElement="Flow_Fraud_Manual"><di:waypoint x="935" y="115" /><di:waypoint x="1030" y="65" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Fraud_Resolved" bpmnElement="Flow_Fraud_Resolved"><di:waypoint x="960" y="140" /><di:waypoint x="1410" y="140" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Wait_Message" bpmnElement="Flow_Wait_Message"><di:waypoint x="1080" y="65" /><di:waypoint x="1150" y="33" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Wait_Timer" bpmnElement="Flow_Wait_Timer"><di:waypoint x="1080" y="65" /><di:waypoint x="1150" y="138" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Message_Record" bpmnElement="Flow_Message_Record"><di:waypoint x="1186" y="33" /><di:waypoint x="1230" y="40" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Record_Merge" bpmnElement="Flow_Record_Merge"><di:waypoint x="1370" y="40" /><di:waypoint x="1435" y="115" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Timer_Approve" bpmnElement="Flow_Timer_Approve"><di:waypoint x="1186" y="138" /><di:waypoint x="1230" y="138" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Approve_Merge" bpmnElement="Flow_Approve_Merge"><di:waypoint x="1370" y="138" /><di:waypoint x="1410" y="140" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Fraud_Join" bpmnElement="Flow_Fraud_Join"><di:waypoint x="1460" y="140" /><di:waypoint x="1555" y="333" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Compliance_Join" bpmnElement="Flow_Compliance_Join"><di:waypoint x="1050" y="340" /><di:waypoint x="1530" y="358" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Limits_Join" bpmnElement="Flow_Limits_Join"><di:waypoint x="1050" y="540" /><di:waypoint x="1555" y="383" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Join_Result" bpmnElement="Flow_Join_Result"><di:waypoint x="1580" y="358" /><di:waypoint x="1650" y="358" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Checks_Denied" bpmnElement="Flow_Checks_Denied"><di:waypoint x="1675" y="383" /><di:waypoint x="1805" y="445" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Checks_Approved" bpmnElement="Flow_Checks_Approved"><di:waypoint x="1700" y="358" /><di:waypoint x="1780" y="260" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Credit_Result" bpmnElement="Flow_Credit_Result"><di:waypoint x="1930" y="260" /><di:waypoint x="1970" y="260" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Credit_Success" bpmnElement="Flow_Credit_Success"><di:waypoint x="2020" y="260" /><di:waypoint x="2090" y="260" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Credit_Failed" bpmnElement="Flow_Credit_Failed"><di:waypoint x="1995" y="285" /><di:waypoint x="2065" y="355" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_NotifySuccess_End" bpmnElement="Flow_NotifySuccess_End"><di:waypoint x="2230" y="260" /><di:waypoint x="2280" y="260" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_FraudDenied_Split" bpmnElement="Flow_FraudDenied_Split"><di:waypoint x="1830" y="470" /><di:waypoint x="1935" y="515" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_OtherDenied_Refund" bpmnElement="Flow_OtherDenied_Refund"><di:waypoint x="1830" y="470" /><di:waypoint x="2040" y="380" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Security_Refund" bpmnElement="Flow_Security_Refund"><di:waypoint x="1960" y="540" /><di:waypoint x="2040" y="510" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_Security_Notify" bpmnElement="Flow_Security_Notify"><di:waypoint x="1935" y="565" /><di:waypoint x="2040" y="630" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_RefundFraud_Join" bpmnElement="Flow_RefundFraud_Join"><di:waypoint x="2180" y="510" /><di:waypoint x="2230" y="540" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_NotifySecurity_Join" bpmnElement="Flow_NotifySecurity_Join"><di:waypoint x="2180" y="630" /><di:waypoint x="2255" y="565" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_SecurityJoin_Notify" bpmnElement="Flow_SecurityJoin_Notify"><di:waypoint x="2280" y="540" /><di:waypoint x="2350" y="540" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_NotifyFraudRefund_End" bpmnElement="Flow_NotifyFraudRefund_End"><di:waypoint x="2500" y="540" /><di:waypoint x="2550" y="540" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_RefundMerge_Refund" bpmnElement="Flow_RefundMerge_Refund"><di:waypoint x="2090" y="380" /><di:waypoint x="2150" y="380" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_RefundGeneral_Notify" bpmnElement="Flow_RefundGeneral_Notify"><di:waypoint x="2300" y="380" /><di:waypoint x="2350" y="380" /></bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Edge_NotifyGeneralRefund_End" bpmnElement="Flow_NotifyGeneralRefund_End"><di:waypoint x="2500" y="380" /><di:waypoint x="2550" y="380" /></bpmndi:BPMNEdge>
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
